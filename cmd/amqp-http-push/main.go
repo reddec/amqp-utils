@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"html/template"
 	"io"
 	"log"
 	"net/http"
@@ -20,11 +21,19 @@ var queue = flag.String("queue", "output", "Queue name to consume")
 var target = flag.String("to", "http://127.0.0.1:9002/a/b/c", "Target URL to push message")
 var consumer = flag.String("name", "", "Consumer name")
 var retry = flag.Duration("retry", 5*time.Second, "Retry interval for push to HTTP server")
+var timeout = flag.Duration("timeout", 20*time.Second, "HTTP POST request timeout")
 var parallel = flag.Int("parallel", 1, "Parallel factors for sending")
 
-func sender(consumer <-chan amqp.Delivery, retry time.Duration) {
+var convert = flag.String("template", "", "Template (Go) that prepares message body before send")
+var headers = common.FlagMapFlags("header", common.MapFlags{"Content-Type": "application/json"}, "HTTP Header (repeated) in k=v format")
+
+func sender(consumer <-chan amqp.Delivery, retry time.Duration, templ *template.Template) {
+	client := &http.Client{Timeout: *timeout}
 	for msg := range consumer {
 		log.Println("Message", msg.MessageId)
+		var data []byte
+		var err error
+
 		toSend := common.Message{}
 		toSend.Body = string(msg.Body)
 		toSend.Headers = msg.Headers
@@ -41,12 +50,25 @@ func sender(consumer <-chan amqp.Delivery, retry time.Duration) {
 		toSend.Exchange = msg.Exchange
 		toSend.RoutingKey = msg.RoutingKey
 
-		data, err := json.Marshal(toSend)
+		if templ == nil {
+			data, err = json.Marshal(toSend)
+		} else {
+			buf := &bytes.Buffer{}
+			err = templ.Execute(buf, toSend)
+			data = buf.Bytes()
+		}
 		if err != nil {
 			log.Fatal(err)
 		}
 		for {
-			response, err := http.Post(*target, "application/json", bytes.NewBuffer(data))
+			req, err := http.NewRequest(http.MethodPost, *target, bytes.NewBuffer(data))
+			if err != nil {
+				log.Fatal("Create request:", err)
+			}
+			for k, v := range *headers {
+				req.Header.Set(k, v)
+			}
+			response, err := client.Do(req)
 			if err != nil {
 				log.Println(err)
 				time.Sleep(retry)
@@ -72,6 +94,17 @@ func sender(consumer <-chan amqp.Delivery, retry time.Duration) {
 func main() {
 	flag.Parse()
 	log.SetOutput(os.Stderr)
+
+	var templ *template.Template
+
+	if *convert != "" {
+		t, err := template.ParseFiles(*convert)
+		if err != nil {
+			log.Fatal(err)
+		}
+		templ = t
+	}
+
 	connection, err := amqp.Dial(*server)
 	if err != nil {
 		log.Fatal(err)
@@ -92,7 +125,7 @@ func main() {
 	for i := 0; i < *parallel; i++ {
 		go func() {
 			defer wg.Done()
-			sender(consumer, *retry)
+			sender(consumer, *retry, templ)
 		}()
 	}
 	log.Println("Started")
