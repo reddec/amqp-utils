@@ -18,7 +18,7 @@ import (
 
 var server = flag.String("amqp", "amqp://guest:guest@localhost:5672/", "AMQP url to source broker")
 var queue = flag.String("queue", "output", "Queue name to consume")
-var target = flag.String("to", "http://127.0.0.1:9002/a/b/c", "Target URL to push message")
+var target = common.FlagStringList("to", common.StringList{}, "(Repeated) Target URL to push message. All urls will be tried untill success")
 var consumer = flag.String("name", "", "Consumer name")
 var retry = flag.Duration("retry", 5*time.Second, "Retry interval for push to HTTP server")
 var timeout = flag.Duration("timeout", 20*time.Second, "HTTP POST request timeout")
@@ -29,6 +29,7 @@ var headers = common.FlagMapFlags("header", common.MapFlags{"Content-Type": "app
 
 func sender(consumer <-chan amqp.Delivery, retry time.Duration, templ *template.Template) {
 	client := &http.Client{Timeout: *timeout}
+	urlIdx := 0
 	for msg := range consumer {
 		log.Println("Message", msg.MessageId)
 		var data []byte
@@ -61,7 +62,7 @@ func sender(consumer <-chan amqp.Delivery, retry time.Duration, templ *template.
 			log.Fatal(err)
 		}
 		for {
-			req, err := http.NewRequest(http.MethodPost, *target, bytes.NewBuffer(data))
+			req, err := http.NewRequest(http.MethodPost, (*target)[urlIdx], bytes.NewBuffer(data))
 			if err != nil {
 				log.Fatal("Create request:", err)
 			}
@@ -72,6 +73,7 @@ func sender(consumer <-chan amqp.Delivery, retry time.Duration, templ *template.
 			if err != nil {
 				log.Println(err)
 				time.Sleep(retry)
+				urlIdx = (urlIdx + 1) % len(*target)
 				continue
 			}
 			io.Copy(os.Stdout, response.Body)
@@ -79,6 +81,7 @@ func sender(consumer <-chan amqp.Delivery, retry time.Duration, templ *template.
 			if response.StatusCode/100 != 2 {
 				log.Println("Unsuccess status code:", response.StatusCode, response.Status)
 				time.Sleep(retry)
+				urlIdx = (urlIdx + 1) % len(*target)
 				continue
 			}
 			log.Println("Sent")
@@ -94,7 +97,9 @@ func sender(consumer <-chan amqp.Delivery, retry time.Duration, templ *template.
 func main() {
 	flag.Parse()
 	log.SetOutput(os.Stderr)
-
+	if len(*target) == 0 {
+		log.Fatal("You have to specify at least one destination")
+	}
 	var templ *template.Template
 
 	if *convert != "" {
