@@ -10,7 +10,6 @@ Assume that you defined `GOPATH/bin` into `PATH`
 
 Also you may setup a service like this:
 
-File: `amqp-http-pull`
 
     [Unit]
 	Description=AMQP utils - pull messages
@@ -35,7 +34,7 @@ And start by
 	systemctl start file.service
 
 
-# HTTP-PUSH
+# HTTP-HOOK
 
 At fact, this is simple web hook, backed by AMQP broker
 
