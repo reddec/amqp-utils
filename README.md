@@ -33,6 +33,11 @@ Stdout sended as message to `ReplyTo` queue (if provided) with `CorrelationId` =
 
 Retries included =)
 
+## amqp-push
+
+Very simple utility that writes lines from stdin as messages to amqp broker or whole
+data as one packet if `--single` flag provided
+
 # Install 
 
 Use [binary builds](https://github.com/reddec/amqp-utils/releases) or build 
