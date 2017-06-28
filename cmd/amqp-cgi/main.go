@@ -90,7 +90,7 @@ func run() error {
 var (
 	name          = app.Flag("app", "Consumer name (app name)").Default(defApp()).Short('a').String()
 	single        = app.Flag("single", "Consume only one message").Short('1').Bool()
-	errorStrategy = app.Flag("fail", "Action if non-zero exit code").Short('f').Default("restart").Enum("drop", "restart", "stop")
+	errorStrategy = app.Flag("fail", "Action if non-zero exit code").Short('f').Default("reply").Enum("drop", "restart", "stop", "reply")
 	command       = app.Arg("command", "Command that will be run on input").Required().Strings()
 )
 
@@ -118,12 +118,28 @@ func receiveMessages(channel *amqp.Channel) error {
 				case "restart":
 					log.Println("Restart after failed command")
 					return err
+				case "reply":
+					log.Println("Failed result reply to sender (if possible)")
+					if msg.ReplyTo != "" {
+						err = channel.Publish("", msg.ReplyTo, false, false, amqp.Publishing{
+							MessageId:     uuid.NewV4().String(),
+							Timestamp:     time.Now(),
+							CorrelationId: msg.CorrelationId,
+							Headers:       amqp.Table{"error": err.Error()},
+							Body:          []byte(err.Error()),
+						})
+					} else {
+						err = nil
+					}
 				default:
 					panic("Unknown strategy " + *errorStrategy)
 				}
 			} else {
 				return err
 			}
+		}
+		if err != nil {
+			break
 		}
 		err = msg.Ack(false)
 		if *single {
