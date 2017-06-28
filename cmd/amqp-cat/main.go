@@ -10,7 +10,7 @@ import (
 	"github.com/alecthomas/kingpin"
 	"fmt"
 	"encoding/json"
-	"encoding/xml"
+	"io"
 )
 
 var app = kingpin.New("amqp-cat", "Read data from AMQP broker")
@@ -31,6 +31,8 @@ var (
 	keys              = app.Arg("routing-key", "Routing keys to bind").Strings()
 )
 
+var realQueue = ""
+
 func createInfrastructure(channel *amqp.Channel) error {
 	log.Println("Checking exchange", *exchange, "type", *exchangeType)
 	err := channel.ExchangeDeclare(*exchange, *exchangeType, true, false, false, false, nil)
@@ -44,11 +46,11 @@ func createInfrastructure(channel *amqp.Channel) error {
 	if err != nil {
 		return err
 	}
-	*queue = q.Name
-	log.Println("Queue is", *queue)
+	realQueue = q.Name
+	log.Println("Queue is", realQueue)
 	for _, key := range *keys {
 		log.Println("Bindingig queue with key", key)
-		err = channel.QueueBind(*queue, key, *exchange, false, nil)
+		err = channel.QueueBind(realQueue, key, *exchange, false, nil)
 		if err != nil {
 			return err
 		}
@@ -78,22 +80,21 @@ func run() error {
 	} else {
 		log.Println("Skip check infrastructure")
 	}
-
 	return receiveMessages(channel)
 }
 
 // Specific options
 var (
-	name    = app.Flag("app", "Consumer name (app name)").Default(defApp()).Short('a').String()
-	single  = app.Flag("single", "Consume only one message").Short('s').Bool()
-	sep     = app.Flag("sep", "Message separator").Default("\n").String()
-	zero    = app.Flag("0", "Zero separator").Short('0').Bool()
-	format  = app.Flag("format", "Output format").Default("raw").Enum("json", "xml", "raw")
+	name   = app.Flag("app", "Consumer name (app name)").Default(defApp()).Short('a').String()
+	single = app.Flag("single", "Consume only one message").Short('1').Bool()
+	sep    = app.Flag("sep", "Message separator").Default("\n").String()
+	zero   = app.Flag("0", "Zero separator").Short('0').Bool()
+	format = app.Flag("format", "Output format").Default("raw").Enum("json", "raw")
 )
 
 func receiveMessages(channel *amqp.Channel) error {
 	log.Println("Start receiveing messages")
-	stream, err := channel.Consume(*queue, *name, false, *exclusive, false, false, nil)
+	stream, err := channel.Consume(realQueue, *name, false, *exclusive, false, false, nil)
 	if err != nil {
 		return err
 	}
@@ -107,10 +108,13 @@ func receiveMessages(channel *amqp.Channel) error {
 			return err
 		}
 		if *single {
-			break
+			return nil
 		}
 	}
-	return nil
+	if err == nil {
+		err = io.EOF
+	}
+	return err
 }
 
 var firstMessage = true
@@ -128,10 +132,6 @@ func dumpMessage(msg amqp.Delivery) error {
 	case "json":
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "    ")
-		err = enc.Encode(msg)
-	case "xml":
-		enc := xml.NewEncoder(os.Stdout)
-		enc.Indent("", "    ")
 		err = enc.Encode(msg)
 	default:
 		panic("Unknown message format")

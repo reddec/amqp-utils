@@ -63,7 +63,7 @@ func run() error {
 // Specific options
 var (
 	name            = app.Flag("app", "Producer name (app name)").Default(defApp()).Short('a').String()
-	single          = app.Flag("single", "Use all STDIN as one message").Short('s').Bool()
+	single          = app.Flag("single", "Use all STDIN as one message").Short('1').Bool()
 	headers         = app.Flag("header", "Additional headers").Short('h').StringMap()
 	sep             = app.Flag("sep", "Message separator").Default("\n").String()
 	zero            = app.Flag("0", "Zero separator").Short('0').Bool()
