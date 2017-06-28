@@ -24,7 +24,7 @@ var (
 	passive           = app.Flag("passive", "Do not try to create infrastructure").Short('p').Bool()
 	once              = app.Flag("once", "Do not reconnect to AMQP").Bool()
 	reconnectInterval = app.Flag("interval", "Reconnect interval").Short('w').Default("3s").Duration()
-	quiet             = app.Flag("quiet", "Disable verbose logging").Short('q').Bool()
+	quiet             = app.Flag("quiet", "Disable verbose logging").Bool()
 	key               = app.Arg("routing-key", "Routing key to publish").String()
 )
 
