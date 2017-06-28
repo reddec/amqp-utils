@@ -2,120 +2,209 @@ package main
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
-	"sync"
 	"time"
 
 	"github.com/satori/go.uuid"
 	"github.com/streadway/amqp"
+	"io/ioutil"
+	"io"
+	"github.com/alecthomas/kingpin"
+	"strings"
 )
 
-var server = flag.String("amqp", "amqp://guest:guest@localhost:5672/", "AMQP url to source broker")
-var queue = flag.String("queue", "output", "Queue name to consume")
-var consumer = flag.String("name", "", "Consumer name")
-var retry = flag.Duration("retry", 5*time.Second, "Retry interval for execute again")
-var parallel = flag.Int("parallel", 1, "Parallel factors for executing")
+var app = kingpin.New("amqp-cgi", "Read data from AMQP broker and execute script")
 
-func executor(consumer <-chan amqp.Delivery, executable []string, channel *amqp.Channel) {
-	for msg := range consumer {
-		log.Println("Message", msg.MessageId)
-		var err error
+// General options
+var (
+	brokerUrl         = app.Flag("url", "AMQP url to target broker").Short('u').Default("amqp://guest:guest@localhost:5672/").String()
+	exchange          = app.Flag("exchange", "Exchange name").Short('e').Default("amq.topic").String()
+	exchangeType      = app.Flag("exchange-type", "Exchange type if create").Default("topic").Enum("topic", "direct")
+	passive           = app.Flag("passive", "Do not try to create infrastructure").Short('p').Bool()
+	queue             = app.Flag("queue", "Queue name (empty for auto generate). Always enables --rm").Short('q').String()
+	removeQueue       = app.Flag("rm", "Remove queue auto disconnect (non-durable)").Bool()
+	exclusive         = app.Flag("exclusive", "Only one consumer can use queue").Bool()
+	once              = app.Flag("once", "Do not reconnect to AMQP").Bool()
+	lazy              = app.Flag("lazy", "Lazy queue (RabbitMQ only)").Short('l').Bool()
+	reconnectInterval = app.Flag("interval", "Reconnect interval").Short('w').Default("3s").Duration()
+	quiet             = app.Flag("quiet", "Disable verbose logging").Short('v').Bool()
+	keys              = app.Flag("routing-key", "Routing keys to bind").Short('k').Strings()
+)
 
-		cmd := exec.Command(executable[0], executable[1:]...)
+var realQueue = ""
 
-		for header, value := range msg.Headers {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("AMQP_%s=%v", header, value))
-		}
-		cmd.Env = append(cmd.Env, "ContentType="+msg.ContentType)
-		cmd.Env = append(cmd.Env, "ContentEncoding="+msg.ContentEncoding)
-		cmd.Env = append(cmd.Env, "CorrelationId="+msg.CorrelationId)
-		cmd.Env = append(cmd.Env, "ReplyTo="+msg.ReplyTo)
-		cmd.Env = append(cmd.Env, "Expiration="+msg.Expiration)
-		cmd.Env = append(cmd.Env, "MessageId="+msg.MessageId)
-		cmd.Env = append(cmd.Env, "Type="+msg.Type)
-		cmd.Env = append(cmd.Env, "Exchange="+msg.Exchange)
-		cmd.Env = append(cmd.Env, "RoutingKey="+msg.RoutingKey)
-
-		cmd.Env = append(cmd.Env, fmt.Sprintf("DeliveryMode=%v", msg.DeliveryMode))
-		cmd.Env = append(cmd.Env, fmt.Sprintf("Priority=%v", msg.Priority))
-		cmd.Env = append(cmd.Env, fmt.Sprintf("Timestamp=%v", msg.Timestamp.Format(time.RFC3339Nano)))
-
-		cmd.Stdin = bytes.NewBuffer(msg.Body)
-		out := &bytes.Buffer{}
-		if msg.ReplyTo != "" {
-			cmd.Stdout = out
-		} else {
-			cmd.Stdout = os.Stdout
-		}
-		cmd.Stderr = os.Stderr
-		err = cmd.Start()
+func createInfrastructure(channel *amqp.Channel) error {
+	log.Println("Checking exchange", *exchange, "type", *exchangeType)
+	err := channel.ExchangeDeclare(*exchange, *exchangeType, true, false, false, false, nil)
+	autoDelete := *removeQueue || *queue == ""
+	log.Println("Checking queue (auto-delete -", autoDelete, ")")
+	args := make(amqp.Table)
+	if *lazy {
+		args["x-queue-mode"] = "lazy"
+	}
+	q, err := channel.QueueDeclare(*queue, true, autoDelete, *exclusive, false, args)
+	if err != nil {
+		return err
+	}
+	realQueue = q.Name
+	log.Println("Queue is", realQueue)
+	for _, key := range *keys {
+		log.Println("Bindingig queue with key", key)
+		err = channel.QueueBind(realQueue, key, *exchange, false, nil)
 		if err != nil {
-			log.Fatal(err)
-		}
-		err = cmd.Wait()
-		if err != nil {
-			log.Println("Something goes run", err)
-			err = msg.Nack(false, true) // Re queue
-			if err != nil {
-				log.Fatal(err)
-			}
-			time.Sleep(*retry)
-		} else {
-			err = msg.Ack(false)
-			if err != nil {
-				log.Fatal(err)
-			}
-		}
-		if msg.ReplyTo != "" {
-			err := channel.Publish("", msg.ReplyTo, false, false, amqp.Publishing{
-				MessageId:     uuid.NewV4().String(),
-				Timestamp:     time.Now(),
-				CorrelationId: msg.MessageId,
-				Body:          out.Bytes(),
-			})
-			if err != nil {
-				log.Fatal(err)
-			}
+			return err
 		}
 	}
+	return err
+}
+
+func run() error {
+	log.Println("Connecting")
+	conn, err := amqp.Dial(*brokerUrl)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	log.Println("Opening channel")
+	channel, err := conn.Channel()
+	if err != nil {
+		return err
+	}
+	defer channel.Close()
+	if !*passive {
+		log.Println("Creating infrastructure if required")
+		err = createInfrastructure(channel)
+		if err != nil {
+			return err
+		}
+	} else {
+		log.Println("Skip check infrastructure")
+	}
+	return receiveMessages(channel)
+}
+
+// Specific options
+var (
+	name          = app.Flag("app", "Consumer name (app name)").Default(defApp()).Short('a').String()
+	single        = app.Flag("single", "Consume only one message").Short('1').Bool()
+	errorStrategy = app.Flag("fail", "Action if non-zero exit code").Short('f').Default("restart").Enum("drop", "restart", "stop")
+	command       = app.Arg("command", "Command that will be run on input").Required().Strings()
+)
+
+func receiveMessages(channel *amqp.Channel) error {
+	log.Println("Start receiveing messages")
+	stream, err := channel.Consume(realQueue, *name, false, *exclusive, false, false, nil)
+	if err != nil {
+		return err
+	}
+	for msg := range stream {
+		log.Println("Got", msg.MessageId, "from", msg.AppId)
+		err = executeScript(msg, channel)
+
+		if err != nil {
+			if _, ok := err.(*exec.ExitError); ok {
+				switch *errorStrategy {
+				case "drop":
+					// continue
+					log.Println("Drop failed command")
+					err = nil
+				case "stop":
+					log.Println("Stop after failed command")
+					*once = false
+					return err
+				case "restart":
+					log.Println("Restart after failed command")
+					return err
+				default:
+					panic("Unknown strategy " + *errorStrategy)
+				}
+			} else {
+				return err
+			}
+		}
+		err = msg.Ack(false)
+		if *single {
+			return err
+		}
+
+	}
+	if err == nil {
+		err = io.EOF
+	}
+	return err
+}
+
+func executeScript(msg amqp.Delivery, channel *amqp.Channel) error {
+	cmd := exec.Command((*command)[0], (*command)[1:]...)
+	log.Println(*command)
+	for header, value := range msg.Headers {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("AMQP_%s=%v", strings.ToUpper(header), value))
+	}
+	cmd.Env = append(cmd.Env, "CONTENT_TYPE="+msg.ContentType)
+	cmd.Env = append(cmd.Env, "CONTENT_ENCODING="+msg.ContentEncoding)
+	cmd.Env = append(cmd.Env, "CORRELATION_ID="+msg.CorrelationId)
+	cmd.Env = append(cmd.Env, "REPLY_TO="+msg.ReplyTo)
+	cmd.Env = append(cmd.Env, "EXPIRATION="+msg.Expiration)
+	cmd.Env = append(cmd.Env, "MESSAGE_ID="+msg.MessageId)
+	cmd.Env = append(cmd.Env, "TYPE="+msg.Type)
+	cmd.Env = append(cmd.Env, "EXCHANGE="+msg.Exchange)
+	cmd.Env = append(cmd.Env, "ROUTING_KEY="+msg.RoutingKey)
+
+	cmd.Env = append(cmd.Env, fmt.Sprintf("DELIVERY_MODE=%v", msg.DeliveryMode))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PRIORITY=%v", msg.Priority))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("TIMESTAMP=%v", msg.Timestamp.Format(time.RFC3339Nano)))
+
+	cmd.Stdin = bytes.NewBuffer(msg.Body)
+	out := &bytes.Buffer{}
+	if msg.ReplyTo != "" {
+		cmd.Stdout = out
+	}
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	if err != nil {
+		log.Println("Execution failed")
+		return err
+	}
+	if msg.ReplyTo != "" {
+		return channel.Publish("", msg.ReplyTo, false, false, amqp.Publishing{
+			MessageId:     uuid.NewV4().String(),
+			Timestamp:     time.Now(),
+			CorrelationId: msg.CorrelationId,
+			Body:          out.Bytes(),
+		})
+	}
+	return nil
+}
+
+func defApp() string {
+	host, _ := os.Hostname()
+	return fmt.Sprintf("%v@%v", host, os.Getpid())
 }
 
 func main() {
-	flag.Parse()
+	app.DefaultEnvars()
+	kingpin.MustParse(app.Parse(os.Args[1:]))
 
-	log.SetOutput(os.Stderr)
-	if len(flag.Args()) == 0 {
-		log.Fatal("You have to specify executable with (optionally) args")
+	if *quiet {
+		log.SetOutput(ioutil.Discard)
+	} else {
+		log.SetOutput(os.Stderr)
 	}
-
-	connection, err := amqp.Dial(*server)
+	var err error
+	for {
+		err = run()
+		if *once || err == nil {
+			break
+		}
+		log.Println("Error", err, "- waiting", *reconnectInterval)
+		time.Sleep(*reconnectInterval)
+	}
 	if err != nil {
-		log.Fatal(err)
+		os.Exit(1)
+	} else {
+		os.Exit(0)
 	}
-	defer connection.Close()
-	channel, err := connection.Channel()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer channel.Close()
-	consumer, err := channel.Consume(*queue, *consumer, false, false, true, false, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	wg := sync.WaitGroup{}
-
-	wg.Add(*parallel)
-	for i := 0; i < *parallel; i++ {
-		go func() {
-			defer wg.Done()
-			executor(consumer, flag.Args(), channel)
-		}()
-	}
-	log.Println("Started")
-	wg.Wait()
-	log.Println("Finished")
 }
