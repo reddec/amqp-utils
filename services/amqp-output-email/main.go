@@ -42,6 +42,62 @@ type Config struct {
 	Mail   Email  `yaml:"mail"`
 }
 
+func (props *Config) consume(deliveries <-chan amqp.Delivery) error {
+
+	for msg := range deliveries {
+		if msg.Headers == nil {
+			msg.Nack(false, false)
+			log.Println("Message", msg.MessageId, "has no headers")
+			continue
+		}
+		to, ok := msg.Headers["to"]
+		if !ok {
+			msg.Nack(false, false)
+			log.Println("Message", msg.MessageId, "has no 'to' header")
+			continue
+		}
+		var dest []string
+
+		if toS, ok := to.(string); ok {
+			dest = []string{toS}
+		} else if toS, ok := to.([]string); ok {
+			dest = toS
+		} else {
+			msg.Nack(false, false)
+			log.Println("Message", msg.MessageId, "has non-string (or non-array-of-string) 'to' header")
+			continue
+		}
+		title, ok := msg.Headers["subject"]
+		if !ok {
+			msg.Nack(false, false)
+			log.Println("Message", msg.MessageId, "has no 'subject' header")
+			continue
+		}
+		titleS, ok := title.(string)
+		if !ok {
+			msg.Nack(false, false)
+			log.Println("Message", msg.MessageId, "has non-string 'subject' header")
+			continue
+		}
+
+		log.Println("Sending...")
+		err := props.Mail.Send(dest, titleS, msg.Body, msg.ContentType, msg.ContentEncoding)
+		if err != nil {
+			log.Println("Failed send", err)
+			msg.Nack(false, true)
+			continue
+		}
+		log.Println("Sent")
+		err = msg.Ack(false)
+		if err != nil {
+			log.Println("Failed ack", err)
+			return err
+		}
+
+	}
+	return nil
+}
+
 func main() {
 	var app = kingpin.New("amqp-email-output", "Push data to AMQP broker and wait for response. Expects headers 'to' and 'subject'")
 	var (
@@ -59,61 +115,7 @@ func main() {
 	var props Config
 	common.MustRead(*config, &props)
 
-	err := props.Reader.Consume(false, func(deliveries <-chan amqp.Delivery) error {
-
-		for msg := range deliveries {
-			if msg.Headers == nil {
-				msg.Nack(false, false)
-				log.Println("Message", msg.MessageId, "has no headers")
-				continue
-			}
-			to, ok := msg.Headers["to"]
-			if !ok {
-				msg.Nack(false, false)
-				log.Println("Message", msg.MessageId, "has no 'to' header")
-				continue
-			}
-			var dest []string
-
-			if toS, ok := to.(string); ok {
-				dest = []string{toS}
-			} else if toS, ok := to.([]string); ok {
-				dest = toS
-			} else {
-				msg.Nack(false, false)
-				log.Println("Message", msg.MessageId, "has non-string (or non-array-of-string) 'to' header")
-				continue
-			}
-			title, ok := msg.Headers["subject"]
-			if !ok {
-				msg.Nack(false, false)
-				log.Println("Message", msg.MessageId, "has no 'subject' header")
-				continue
-			}
-			titleS, ok := title.(string)
-			if !ok {
-				msg.Nack(false, false)
-				log.Println("Message", msg.MessageId, "has non-string 'subject' header")
-				continue
-			}
-
-			log.Println("Sending...")
-			err := props.Mail.Send(dest, titleS, msg.Body, msg.ContentType, msg.ContentEncoding)
-			if err != nil {
-				log.Println("Failed send", err)
-				msg.Nack(false, true)
-				continue
-			}
-			log.Println("Sent")
-			err = msg.Ack(false)
-			if err != nil {
-				log.Println("Failed ack", err)
-				return err
-			}
-
-		}
-		return nil
-	})
+	err := props.Reader.Consume(false, props.consume)
 	if err != nil {
 		log.Fatal(err)
 	}
