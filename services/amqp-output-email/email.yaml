@@ -1,0 +1,20 @@
+mail:
+  host: smtp.example.com
+  port: 25
+  user: "user@example.com"
+  password: "P@$$word"
+  from: "user@example.com"
+
+reader:
+  url: "amqp://guest:guest@localhost:5672"
+  reconnect:
+    interval: '3s'
+  queue:
+    name: "output.email"
+    binding:
+      output:
+        - "email"
+  exchange:
+    name: "output"
+    durable: true
+    lazy: true
