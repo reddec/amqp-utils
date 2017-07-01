@@ -1,6 +1,6 @@
-mail:
+smtp:
   host: smtp.example.com
-  port: 25
+  port: 587
   user: "user@example.com"
   password: "P@$$word"
   from: "user@example.com"
@@ -11,10 +11,10 @@ reader:
     interval: '3s'
   queue:
     name: "output.email"
+    lazy: true
     binding:
       output:
         - "email"
   exchange:
     name: "output"
     durable: true
-    lazy: true

@@ -39,7 +39,7 @@ func (e *Email) Send(to []string, subject string, body []byte, contentType, cont
 
 type Config struct {
 	Reader common.Reader `yaml:"reader"`
-	Mail   Email  `yaml:"mail"`
+	Mail   Email  `yaml:"smtp"`
 }
 
 func (props *Config) consume(deliveries <-chan amqp.Delivery) error {
@@ -80,7 +80,7 @@ func (props *Config) consume(deliveries <-chan amqp.Delivery) error {
 			continue
 		}
 
-		log.Println("Sending...")
+		log.Println("Sending", msg.MessageId, "...")
 		err := props.Mail.Send(dest, titleS, msg.Body, msg.ContentType, msg.ContentEncoding)
 		if err != nil {
 			log.Println("Failed send", err)

@@ -1,0 +1,17 @@
+imap:
+  host: imap.example.com:993
+  tls: true
+  user: "user@example.com"
+  password: "P@$$word"
+  mailbox: "INBOX"
+  reconnect:
+    interval: '3s'
+
+writer:
+  url: "amqp://guest:guest@localhost:5672"
+  reconnect:
+    interval: '3s'
+  routing_key: "email"
+  exchange:
+    name: "input"
+    durable: true
