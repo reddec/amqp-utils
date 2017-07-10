@@ -3,6 +3,7 @@ package common
 import (
 	"log"
 	"github.com/streadway/amqp"
+	"context"
 )
 
 type Queue struct {
@@ -84,4 +85,39 @@ func (r *Reader) Consume(autoAck bool, handler func(<-chan amqp.Delivery) error)
 		log.Println("Ready to consume")
 		return handler(stream)
 	})
+}
+
+type ReaderFunc func(delivery amqp.Delivery) error
+
+type ReaderHandler interface {
+	Serve(delivery amqp.Delivery) error
+}
+
+type Consumer struct {
+	Name      string     `yaml:"name"`
+	Queue     string     `yaml:"queue"`
+	Exclusive bool       `yaml:"exclusive"`
+	reader    ReaderFunc `yaml:"-"`
+}
+
+func (cons *Consumer) SetHandlerFunc(reader ReaderFunc) {
+	cons.reader = reader
+}
+
+func (cons *Consumer) SetHandler(handler ReaderHandler) {
+	cons.reader = handler.Serve
+}
+
+func (cons *Consumer) Serve(channel *amqp.Channel, ctx context.Context) error {
+	delivery, err := channel.Consume(cons.Queue, cons.Name, false, cons.Exclusive, false, false, nil)
+	if err != nil {
+		return err
+	}
+	for msg := range delivery {
+		err = cons.reader(msg)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
